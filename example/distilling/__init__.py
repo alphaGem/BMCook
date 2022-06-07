@@ -1,31 +1,9 @@
-import torch
-from torch import nn
+import types
+from typing import List
 import bmtrain as bmt
 import torch.nn.functional as F
-import cpm_kernels.torch as ct
-
-
-class HiddenMap(bmt.DistributedModule):
-    def __init__(self, dim_from, dim_to, dtype=torch.half, 
-                 init_std=0.02, int8=False):
-        super().__init__()
-
-        self.dtype = dtype
-        self.int8 = int8
-
-        init_method = bmt.ParameterInitializer(
-            nn.init.normal_, mean=0.0, std=init_std)
-        self.map = bmt.DistributedParameter(
-            torch.empty(dim_to, dim_from, dtype=dtype), 
-            init_method=init_method)
-    
-    def forward(self, x):
-        map = self.map
-        # Map hidden states from student to teacher
-        # (1#batch, dim_to, dim_from) @ (batch, dim_from, seq_len) = (batch, dim_to, seq_len)
-        x = ct.bmm(map.unsqueeze(0), False, x, False, int8=self.int8)
-        return x
-
+import model_center
+from .BMDistillStrategy import BMDistillStrategy, OutputCELoss, HiddenMSELoss
 
 class BMDistill:
     '''
@@ -33,124 +11,92 @@ class BMDistill:
     '''
 
     @classmethod
-    def init_student(cls, student, teacher_sd):
-        '''
-
-        Initialize the student model based on the parameters of the teacher model, i.e, copy every 2 layer from teacher to student.
-
-        :param student: Student model.
-        :param teacher_sd: State dictionary of the teacher model.
-
-        '''
-        # teacher_sd = teacher.state_dict()
-        student_sd = {}
-        for k, weights in teacher_sd.items():
-            if 'dec_layers' not in k:
-                student_sd[k] = weights
-            else:
-                layer = int(k.split('.')[1])
-                if layer % 2 == 0:
-                    new_layer = str(layer // 2)
-                    new_k = k.replace(str(layer), new_layer)
-                    student_sd[new_k] = weights
-        student.load_state_dict(student_sd)
-
-    @classmethod
-    def set_forward(cls, student, teacher, foward_fn,
-                    temp=1.0, kd_loss_scale=1.0, 
-                    output_kd_loss=False,
-                    int8=False,
-                    # Various KD loss
-                    ce_logits=False,
-                    mse_last_hidden=False,
-                    mse_hidden_states=False,
-                    mse_att=False,
-                    mse_emb=False):
+    def set_forward(cls,
+        student,
+        teacher,
+        forward_fn,
+        strategies: List[BMDistillStrategy]):
         '''
         Modify the forward function of the student model to compute additional knowledge distillation loss.
-
         `student` and `teacher` should return (logits, hidden_states, att_scores).
         logits: (batch_size, vocab_size)
         hidden_states: (batch_size, dec_len, hidden_size)
         att_scores: (batch_size, dec_len, enc_len)
-
         :param student: Student model.
         :param teacher: Teacher model.
         :param foward_fn: Forward function of the student model.
-        :param temp: Temperature for knowledge distillation.
-        :param kd_loss_scale: Scale of the knowledge distillation loss.
-        :param output_kd_loss: Whether to output the knowledge distillation loss.
-        :param ce_logits: Whether to use cross entropy loss for the output logits.
-        :param mse_last_hidden: Whether to use MSE loss for the last hidden state.
-        :param mse_hidden_states: Whether to use MSE loss for the hidden states.
-        :param mse_att: Whether to use MSE loss for the attention matrices.
-        :param mse_emb: Whether to use MSE loss for the embedding matrices.
-        :return: Modified forward function, whose return values are 1. (model, dec_input, dec_length, targets) -> loss, logits, kd_loss 2. (model, dec_input, dec_length, targets) -> loss, logits. Returns 1 if `output_kd_loss` is True, else return 2.
+        :param strategies: List of distillation strategies used in the process.
         '''
-
-        cls.int8 = int8
-
-        assert any([ce_logits, mse_last_hidden, mse_hidden_states, mse_att, mse_emb])
-
-        if mse_hidden_states:
-            cls.hidden_map = HiddenMap(teacher.dim_model, student.dim_model)
-            bmt.init_parameters(cls.hidden_map)
-            bmt.synchronize()
+        # Inspect all necessary tensors
+        module_s = {}
+        module_t = {}
+        for strategy in strategies:
+            module_s.update(strategy.module_s)
+            module_t.update(strategy.module_t)
+        inject_inspection(student, module_s, '_student')
+        inject_inspection(teacher, module_t, '_teacher')
 
         def forward(model, dec_input, dec_length, targets, loss_func):
-            outputs = foward_fn(
-                model, dec_input, dec_length, targets, loss_func)
+            # Get the output of both student and teacher models.
+            with bmt.inspect.inspect_tensor() as inspector:
+                outputs = forward_fn(
+                    model, dec_input, dec_length, targets, loss_func
+                )
+                outputs_t = teacher(
+                    dec_input, dec_length, return_logits = True
+                )
+            
+            # Get necessary tensors of hidden layers
+            records = {}
+            for record in inspector._summary:
+                records[record['name']] = record['tensor']
+            records_s = read_inspection(records, module_s, '_student')
+            records_t = read_inspection(records, module_t, '_teacher', detach=True)
+
+            # Calculation of modified loss
             loss = outputs[0]
-            model_outputs = outputs[1:]
-            logits_s = model_outputs[0]
-            hidden_s = model_outputs[1]
-            att_scores_s = model_outputs[2]
+            d_loss = 0
+            logits_s = outputs[1]
+            logits_t = outputs_t.detach()
+            for strategy in strategies:
+                d_loss = d_loss + strategy.loss(logits_s, logits_t, records_s, records_t)
+            loss = loss + d_loss
 
-            outputs_t = teacher(dec_input, dec_length)
-            logits_t = outputs_t[0].detach()
-            hidden_t = outputs_t[1]
-            att_scores_t = outputs_t[2]
+            outputs[0] = loss
+            outputs = outputs + [d_loss, ]
 
-            # Compute loss and d_loss
-            d_loss = 0.0
-            if ce_logits:
-                prob_t = F.softmax(logits_t / temp, dim=-1)
-                log_prob_s = F.log_softmax(logits_s / temp, dim=-1)
-                d_loss += -(prob_t * log_prob_s).sum(dim=1).mean()
-
-            # MSE loss on last hidden states
-            if mse_last_hidden:
-                h_t = hidden_t[-1].detach()
-                h_s = hidden_s[-1]
-                d_loss += F.mse_loss(h_s, h_t)
-
-            # MSE loss on all hidden states
-            if mse_hidden_states:
-                cls.hidden_map.to(dec_input.device)
-                ratio = len(hidden_t) // len(hidden_s)
-                fit_target = [hidden_t[i]
-                    for i in range(ratio - 1, len(hidden_t), ratio)]
-                for h_s, h_t in zip(hidden_s, fit_target):
-                    h_t = h_t.detach()
-                    # Map hidden states from student to teacher
-                    h_s = cls.hidden_map(h_s)
-                    d_loss += F.mse_loss(h_s, h_t)
-
-            # MSE loss on attention scores
-            if mse_att:
-                ratio = len(hidden_t) // len(hidden_s)
-                fit_target = [att_scores_t[i]
-                    for i in range(ratio - 1, len(att_scores_t), ratio)]
-                for att_s, att_t in zip(att_scores_s, fit_target):
-                    att_t = att_t.detach()
-                    att_t = att_t[att_t != -torch.inf]
-                    att_s = att_s[att_s != -torch.inf]
-                    d_loss += F.mse_loss(att_s, att_t)
-
-            loss = loss + kd_loss_scale * d_loss
-
-            outputs = (loss, logits_s)
-            if output_kd_loss:
-                outputs = outputs + (d_loss, )
             return outputs
+
         return forward
+
+def inject_inspection(model, modules, suffix):
+    select_keys = set()
+    for k, v in model.named_modules():
+        if k in modules:
+            select_keys.add(k)
+            v.forward_old = v.forward
+            v.inspect_name = k + suffix
+            
+            if modules[k]['type'] == 'pre':
+                def _forward(module_self, x):
+                    bmt.inspect.record_tensor(x, module_self.inspect_name)
+                    return module_self.forward_old(x)
+            
+            elif modules[k]['type'] == 'post':
+                def _forward(module_self, x):
+                    x = module_self.forward_old(x)
+                    bmt.inspect.record_tensor(x, module_self.inspect_name)
+                    return x
+            
+            v.forward = types.MethodType(_forward, v)
+    
+    bmt.print_rank('Selected modules for hidden state MSE: {}'.format(select_keys))   
+
+def read_inspection(records, modules, suffix, detach=False):
+    result = {}
+    for k in modules:
+        if detach:
+            result[k] = records[k+suffix].detach()
+        else:
+            result[k] = records[k+suffix]
+    return result
