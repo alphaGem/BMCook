@@ -3,8 +3,8 @@ import torch
 import types
 import random
 import bmtrain as bmt
-from transformers import GPT2ForTokenClassification
-from tqdm import tqdm
+# from transformers import GPT2ForTokenClassification
+# from tqdm import tqdm
 import time
 import os
 import sys
@@ -77,11 +77,12 @@ class Trainer:
         outputs = model(
             dec_input, dec_length, return_logits=True)
         logits = outputs
+        logits = logits[:,:,:-1]
         batch, seq_len, vocab_out_size = logits.size()
 
         loss = loss_func(logits.view(batch * seq_len, vocab_out_size), targets.view(batch * seq_len))
 
-        #bmt.print_rank(logits)
+        #bmt.print_rank(logits.argmax(dim=-1))
 
         return [loss, logits]
 
@@ -102,7 +103,6 @@ def main():
 
     
     for _, v in gpt.named_modules():
-        # bmt.print_rank(_,v)
         if isinstance(v, bmt.TransformerBlockList):
 
             def new_func(list_self, hidden_states, *args):
@@ -126,12 +126,12 @@ def main():
     MHA_pruning_list = [bmp.strategy.MHALayerPruning(i) for i in range(gpt_config.num_layers)]
     FFN_pruning_list = [bmp.strategy.FFNLayerPruning(i) for i in range(gpt_config.num_layers)]
     MHAs_pruning_list = [bmp.strategy.AttentionHeadPruning(gpt_config.num_heads, i) for  i  in range(gpt_config.num_layers)]
-    FFNi_pruning_list = [bmt.strategy.FFNIntermediatePruning(gpt_config.dim_ff, i)  for i in range(gpt_config.num_layers)]
+    FFNi_pruning_list = [bmp.strategy.FFNIntermediatePruning(gpt_config.dim_ff, i)  for i in range(gpt_config.num_layers)]
     pruning_list = MHA_pruning_list + FFN_pruning_list + MHAs_pruning_list + FFNi_pruning_list
     
-    prune_loss = bmt.loss_controller.LagrangianPenalty(
+    prune_loss = bmp.loss_controller.LagrangianPenalty(
         lmbd = 1, 
-        size_calculator = bmt.loss_controller.GPT2SizeCalculator(gpt_config), 
+        size_calculator = bmp.loss_controller.GPT2SizeCalculator(gpt_config), 
         target_sparsity = 0.12, 
         optimizer = optimizer
     )
@@ -157,8 +157,7 @@ def main():
     count = 0
     total_loss = 0.0
 
-    prune_end_step = 30000
-    distill_end_step = 40000
+    prune_end_step = 2000
 
     for iteration, data in enumerate(Trainer.batch_iter(dataset, batch_size, bmt.rank(), bmt.world_size())):
         
@@ -174,79 +173,51 @@ def main():
         dec_input = dec_input.cuda()
         dec_length = dec_length.cuda()
 
-        if iteration <= distill_end_step:
-            optimizer.zero_grad()
-            outputs = Trainer.forward(
-                gpt, dec_input, dec_length, targets, loss_func)
+        optimizer.zero_grad()
+        outputs = Trainer.forward(
+            gpt, dec_input, dec_length, targets, loss_func)
 
-            loss = outputs[0]
-            p = outputs[-1]
-            global_loss = bmt.sum_loss(loss).item()
-            original_loss = bmt.sum_loss(loss-p).item()
-            loss = optimizer.loss_scale(loss)
+        loss = outputs[0]
+        p = outputs[-1]
+        global_loss = bmt.sum_loss(loss).item()
+        original_loss = bmt.sum_loss(loss-p).item()
+        loss = optimizer.loss_scale(loss)
 
-            loss.backward()
-            bmt.optim_step(optimizer, lr_scheduler)
+        loss.backward()
+        bmt.optim_step(optimizer, lr_scheduler)
 
-            if iteration % 1000 == 0:
-                torch.save(gpt.state_dict(),'results/model.pt')
-                torch.save(pruner.state_dict(),'results/masks.pt')
-                print_inspect(gpt, "*")
-            
+        if iteration % 1000 == 0:
+            torch.save(gpt.state_dict(),'results/model.pt')
+            torch.save(pruner.state_dict(),'results/masks.pt')
+            print_inspect(gpt, "*")
             
 
-            if iteration % 100 == 0:
-                for p in MHA_pruning_list:
-                    p.print_mask()
-                bmt.print_rank('-'*89)
-                for p in FFN_pruning_list:
-                    p.print_mask()
-                bmt.print_rank('-'*89)
-                for p in MHAs_pruning_list:
-                    p.print_mask()
-                bmt.print_rank('-'*89)
-                for p in FFNi_pruning_list:
-                    p.print_mask()
-                bmt.print_rank('-'*89)
-                bmt.print_rank(prune_loss.get_rate())
-                if prune_loss.get_rate() < 0.12 and prune_end_step > iteration + 100:
-                    prune_end_step = iteration + 100
-                    distill_end_step = iteration + 10100
-            
-            iteration_time = time.time() - st
-            average_time = average_time * average_time_shift + (1 - average_time_shift) * iteration_time
-            bmt.print_rank(
-                "| Iter: {:6d} | loss: {:.4f} | scale: {:10.4f} | time: {:.4f} | original_loss: {:.4f} |".format(
-                    iteration,
-                    global_loss,
-                    int(optimizer.scale), 
-                    average_time,
-                    original_loss
-                )
+        if iteration % 100 == 0:
+            for p in MHA_pruning_list:
+                p.print_mask()
+            bmt.print_rank('-'*89)
+            for p in FFN_pruning_list:
+                p.print_mask()
+            bmt.print_rank('-'*89)
+            for p in MHAs_pruning_list:
+                p.print_mask()
+            bmt.print_rank('-'*89)
+            for p in FFNi_pruning_list:
+                p.print_mask()
+            bmt.print_rank('-'*89)
+            bmt.print_rank(prune_loss.get_rate())
+        
+        iteration_time = time.time() - st
+        average_time = average_time * average_time_shift + (1 - average_time_shift) * iteration_time
+        bmt.print_rank(
+            "| Iter: {:6d} | loss: {:.4f} | scale: {:10.4f} | time: {:.4f} | original_loss: {:.4f} |".format(
+                iteration,
+                global_loss,
+                int(optimizer.scale), 
+                average_time,
+                original_loss
             )
-
-
-        if iteration > distill_end_step:
-            outputs = Trainer.forward(
-                gpt, dec_input, dec_length, targets, loss_func
-            )
-
-            loss = outputs[0]
-            global_loss = bmt.sum_loss(loss).item()
-            total_loss += global_loss
-            count = count +1
-
-            iteration_time = time.time() - st
-            average_time = average_time * average_time_shift + (1 - average_time_shift) * iteration_time
-            bmt.print_rank(
-                "| Iter: {:6d} | loss: {:.4f} | scale: {:10.4f} | time: {:.4f} | avg eval loss: {:.4f}|".format(
-                    iteration,
-                    global_loss,
-                    int(optimizer.scale), 
-                    average_time,
-                    total_loss/count,
-                )
-            )
+        )
 
         if iteration == prune_end_step:
             pruner.eval()
@@ -272,10 +243,10 @@ def main():
                 dim_s=gpt_config.dim_model,
                 projection_init_method='identical')
             
-            distill_hidden.register_layer_teacher('encoder.layers.4.ffn.layernorm_before_ffn','post')
-            distill_hidden.register_layer_teacher('encoder.layers.13.ffn.layernorm_before_ffn','post')
-            distill_hidden.register_layer_teacher('encoder.layers.22.ffn.layernorm_before_ffn','post')
-            distill_hidden.register_layer_teacher('encoder.layers.31.ffn.layernorm_before_ffn','post')
+            distill_hidden.register_layer_teacher('encoder.layers.2.ffn.layernorm_before_ffn','post')
+            distill_hidden.register_layer_teacher('encoder.layers.5.ffn.layernorm_before_ffn','post')
+            distill_hidden.register_layer_teacher('encoder.layers.8.ffn.layernorm_before_ffn','post')
+            distill_hidden.register_layer_teacher('encoder.layers.11.ffn.layernorm_before_ffn','post')
 
             distiller = bmd.BMDistill([distill_hidden, distill_ce])
 
@@ -288,10 +259,6 @@ def main():
             teacher.eval()
 
             # distilling declaration ends
-
-        if iteration == distill_end_step:
-            distiller.eval()
-            gpt.eval()
 
         
 

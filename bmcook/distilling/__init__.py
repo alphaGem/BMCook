@@ -1,2 +1,2 @@
-from distilling import *
+from .distilling import *
 from . import strategy

@@ -1,19 +1,22 @@
 import types
 from typing import List
+from functools import wraps
 import bmtrain as bmt
 import torch.nn.functional as F
 import model_center
-from .BMDistillStrategy import BMDistillStrategy
+from .strategy import BMDistillStrategy
 
 
 def inject_inspection(model, modules, suffix):
     def generate_new_forward(f, t, inspect_name):
         if  t == 'pre':
+            @wraps(f)
             def _forward(x, **kwargs):
                 bmt.inspect.record_tensor(x, inspect_name)
                 return f(x, **kwargs)
         
         elif modules[k]['type'] == 'post':
+            @wraps(f)
             def _forward(x, **kwargs):
                 x = f(x, **kwargs)
                 bmt.inspect.record_tensor(x, inspect_name)
@@ -42,6 +45,11 @@ class BMDistill(bmt.DistributedModule):
     BMDistill provide additional training objectives for knowledge distillation, which further improves the performance of compressed models.
     '''
     def __init__(self, strategies: List[BMDistillStrategy]):
+        r"""Initializes BMDistill class.
+        
+        Args:
+            strategies (List[BMDistillStrategy]): Strategies to be used in the distilling process. 
+        """
         super().__init__()
         self.strategies = strategies
 
@@ -55,10 +63,14 @@ class BMDistill(bmt.DistributedModule):
         logits: (batch_size, vocab_size)
         hidden_states: (batch_size, dec_len, hidden_size)
         att_scores: (batch_size, dec_len, enc_len)
-        :param student: Student model.
-        :param teacher: Teacher model.
-        :param foward_fn: Forward function of the student model.
-        :param strategies: List of distillation strategies used in the process.
+
+        Args:
+            student (torch.nn.Module): Student model.
+            teacher (torch.nn.Module): Teacher model.
+            forward_fn (callable): Forward function of the student model.
+
+        Returns:
+            Decorated `forward_fn` function.
         '''
         # Inspect all necessary tensors
         module_s = {}
@@ -70,6 +82,7 @@ class BMDistill(bmt.DistributedModule):
         inject_inspection(student, module_s, '_student')
         inject_inspection(teacher, module_t, '_teacher')
 
+        @wraps(forward_fn)
         def forward(model, dec_input, dec_length, targets, loss_func):
             # Get the output of both student and teacher models.
             with bmt.inspect.inspect_tensor() as inspector:

@@ -6,6 +6,11 @@ class BMPruneLossController(bmt.DistributedModule):
         return 0
 
 class BrutePenalty(BMPruneLossController):
+    r"""Adds brute penalty calculated by size of the model to the final loss.
+    
+    The additional loss is :math:`\mathcal{L}=\lambda \times \mathrm{current\_size}/\mathrm{original\_size}`
+    """
+
     def __init__(self, lmbd, size_calculator):
         super().__init__()
         self.lmbd = lmbd
@@ -29,7 +34,7 @@ class LagrangianPenalty(BMPruneLossController):
         self.original_size = self.size_calculator.get_size()
         bmt.print_rank('model size is', self.original_size)
         self.target_sparsity = target_sparsity
-        optimizer.add_param_group({'params': self.parameters(), 'maximize': True, 'lr': 0.001})
+        optimizer.add_param_group({'params': self.parameters(), 'maximize': True, 'lr': 0.01})
     
     def get_loss(self):
         s = (self.size_calculator.get_size() / self.original_size).to(torch.half)

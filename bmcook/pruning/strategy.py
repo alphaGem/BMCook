@@ -11,13 +11,33 @@ import model_center
 limit_a, limit_b, epsilon = -.1, 1.1, 1e-4
 
 class BMPruneStrategy(bmt.DistributedModule):
+    r"""Abstract class for pruning strategies.
+
+    """
     def __init__(self,
         targets,
         type):
-        '''
-        :param targets: List of Linear(), targets to be pruned.
-        :param type: 'pre', 'post', whether to add the mask pre or post the layer.
-        '''
+        r"""Initializes :class:`BMPruneStrategy`.
+
+        Adds masks to linear layers.
+        
+        .. math::
+            \sum_{i=1}^n i
+
+        Let the linear layer be :math:`f: \mathbb{R}^n \to \mathbb{R}^m; x \mapsto f(x)`, and let the mask be :math:`z`.
+        
+        If `type` is set to 'pre', we have :math:`z \in \mathbb{R}^n`,
+        and the new linear layer is :math:`x \mapsto f(x \cdot \mathrm{diag}(z))`.
+
+        If `type` is set to 'post', we have :math:`z \in \mathbb{R}^m`,
+        and the new linear layer is :math:`x \mapsto f(x) \cdot \mathrm{diag}(z)`.
+
+        Args:
+            targets:
+                List of Linear(), targets to be pruned.
+            type:
+                Choose from 'pre' or 'post': whether to add the mask before or after the layer.
+        """
         super().__init__()
         self.targets = targets
         self.type = type
