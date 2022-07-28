@@ -9,7 +9,7 @@ import time
 import os
 import sys
 
-from data import MMapIndexedDataset, Dataset
+from bmcook.data import MMapIndexedDataset, Dataset
 import numpy as np
 import pickle as pkl
 from model_center.model import GPT2Config, GPT2
@@ -148,7 +148,8 @@ def main():
     dec_len = 128
 
     dataset = Dataset(
-        MMapIndexedDataset("../openwebtxt/openwebtext_text_document")
+        MMapIndexedDataset("../openwebtxt/openwebtext_text_document"),
+        dec_len
     )
 
     average_time = 0
