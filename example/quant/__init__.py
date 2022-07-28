@@ -1,3 +1,7 @@
+import types
+import model_center
+import math
+import cpm_kernels.torch as ct
 
 class BMQuant:
     '''
@@ -13,14 +17,32 @@ class BMQuant:
     '''
 
     @classmethod
-    def quantize(cls, model):
+    def quantize(cls, model, config):
         '''
         Recursively change the linear transformations in the model to quantized version. Current implementation only supports GPT-J. To customize the quantization for other models, you can override this method. In the future, we will support customization by additional configuration files instead of hard coding.
 
         :param model: Model to quantize.
         '''
-        # Will implement more generally in the next version to support arbitrary models
-        for layer_idx in range(len(model.dec_layers)):
-            layer = model.dec_layers[layer_idx]
-            layer._module.ff.int8 = True
-            layer._module.self_attention.int8 = True
+
+        quant_config = config.get('quantization')
+        if not quant_config['is_quant']:
+            return
+
+        for name, module in model.named_modules():
+            if isinstance(module, model_center.layer.Linear):
+                if len(quant_config["quantized_module"]) != 0:
+                    if not any([pattern in name for pattern in quant_config["quantized_module"]]):
+                        continue
+                module.forward = types.MethodType(forward_in8, module)
+
+def forward_in8(module_self, x):
+    if module_self.length_scale and module_self.length_scale_before:
+        x = x / math.sqrt(module_self.dim_in)
+    x = x.transpose(1, 2).contiguous()
+    x = ct.bmm(module_self.weight.unsqueeze(0), False, x, False, int8=True)
+    x = x.transpose(1, 2).contiguous()
+    if module_self.length_scale and not module_self.length_scale_before:
+        x = x / math.sqrt(module_self.dim_in)
+    if module_self.bias is not None:
+        x = x + module_self.bias
+    return x
