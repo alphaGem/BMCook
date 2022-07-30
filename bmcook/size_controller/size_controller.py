@@ -53,9 +53,12 @@ class LagrangianPenalty(BMSizeController):
         self.target_sparsity = target_sparsity
     
     def loss(self):
-        s = (self.size_calculator.get_size() / self.original_size).to(torch.half)
-        t = self.target_sparsity
-        return self.alpha * (self.l1*(s-t) + self.l2*(s-t)*(s-t))
+        if self.training:
+            s = (self.size_calculator.get_size() / self.original_size).to(torch.half)
+            t = self.target_sparsity
+            return self.alpha * (self.l1*(s-t) + self.l2*(s-t)*(s-t))
+        else:
+            return 0
 
     def get_rate(self):
         s = (self.size_calculator.get_size() / self.original_size).to(torch.half)

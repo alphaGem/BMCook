@@ -116,7 +116,7 @@ class DynamicHiddenMSELoss(HiddenLoss):
             h_t = records_t[name_t]
             match_loss = F.mse_loss(h_s, self.W_layer(h_t))
             loss += match_loss
-            bmt.print_rank(best_name+':'+name_t)
+            # bmt.print_rank(best_name+':'+name_t)
 
         return loss*self.scale
 

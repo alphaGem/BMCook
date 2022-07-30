@@ -33,22 +33,24 @@ class Compressor(bmt.DistributedModule):
                     'params': pruner.parameters(),
                     'lr': 0.01
                 }
-            ])
+            ], scale=2**20)
         if any(param.requires_grad for param in size_controller.parameters()):
             self.size_controller_optimizer = bmt.optim.AdamOptimizer([
                 {
                     'params': size_controller.parameters(),
                     'lr': size_controller.lr
                 }
-            ])
+            ], scale=2**20)
 
     def zero_grad(self):
         if self.pruner_optimizer: self.pruner_optimizer.zero_grad()
         if self.size_controller_optimizer: self.size_controller_optimizer.zero_grad()
 
     def step(self):
-        if self.pruner_optimizer: bmt.optim_step(self.pruner_optimizer)
-        if self.size_controller_optimizer: bmt.optim_step(self.size_controller_optimizer)
+        if self.pruner_optimizer and self.pruner.training:
+            bmt.optim_step(self.pruner_optimizer)
+        if self.size_controller_optimizer and self.size_controller.training:
+            bmt.optim_step(self.size_controller_optimizer)
 
     def loss(self):
         loss = self.distiller.loss() + self.size_controller.loss()

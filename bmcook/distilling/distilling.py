@@ -120,4 +120,8 @@ class BMDistill(bmt.DistributedModule):
     def set_loss(self, loss):
         self.d_loss = loss
     def loss(self):
-        return self.d_loss
+        bmt.print_rank('distill_loss', self.d_loss)
+        if self.training:
+            return self.d_loss
+        else:
+            return 0

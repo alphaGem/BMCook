@@ -222,11 +222,24 @@ def main():
         loss.backward()
         bmt.optim_step(optimizer, lr_scheduler)
         compressor.step() #NB
+        iteration_time = time.time() - st
+        average_time = average_time * average_time_shift + (1 - average_time_shift) * iteration_time
+        bmt.print_rank(global_loss.item(), original_loss.item())
+        bmt.print_rank(
+            "| Iter: {:6d} | loss: {:.4f} | scale: {:10.4f} | time: {:.4f} | original_loss: {:.4f} |".format(
+                iteration,
+                global_loss.item(),
+                int(optimizer.scale), 
+                average_time,
+                original_loss.item()
+            )
+        )
+
+
         if iteration % 1000 == 0:
             torch.save(gpt.state_dict(),'results/model.pt')
             torch.save(pruner.state_dict(),'results/masks.pt')
             print_inspect(gpt, "*")
-            
 
         if iteration % 100 == 0:
             for p in MHA_pruning_list:
@@ -242,19 +255,10 @@ def main():
                 p.print_mask()
             bmt.print_rank('-'*89)
             bmt.print_rank(size_loss.get_rate())
-        
-        iteration_time = time.time() - st
-        average_time = average_time * average_time_shift + (1 - average_time_shift) * iteration_time
-        bmt.print_rank(global_loss.item(), original_loss.item())
-        bmt.print_rank(
-            "| Iter: {:6d} | loss: {:.4f} | scale: {:10.4f} | time: {:.4f} | original_loss: {:.4f} |".format(
-                iteration,
-                global_loss.item(),
-                int(optimizer.scale), 
-                average_time,
-                original_loss.item()
-            )
-        )
+            if size_loss.get_rate() < 0.8:
+                bmt.print_rank('pruning shut down')
+                pruner.eval()
+                size_loss.eval()
 
 
         
