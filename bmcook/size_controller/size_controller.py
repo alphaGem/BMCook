@@ -1,29 +1,46 @@
 import bmtrain as bmt
 import torch
 
-class BMPruneLossController(bmt.DistributedModule):
-    def get_loss(self):
+class BMSizeController(bmt.DistributedModule):
+    r"""Calculates loss according to the model sparsity.
+    """
+    def __init__(self, alpha, size_calculator):
+        super().__init__()
+        self.alpha = alpha
+        self.size_calculator = size_calculator
+    def loss(self):
         return 0
 
-class BrutePenalty(BMPruneLossController):
+class BrutePenalty(BMSizeController):
     r"""Adds brute penalty calculated by size of the model to the final loss.
     
     The additional loss is :math:`\mathcal{L}=\lambda \times \mathrm{current\_size}/\mathrm{original\_size}`
     """
 
-    def __init__(self, lmbd, size_calculator):
-        super().__init__()
-        self.lmbd = lmbd
-        self.size_calculator = size_calculator
+    def __init__(self, alpha, size_calculator):
+        super().__init__(alpha, size_calculator)
         self.original_size = self.size_calculator.get_size()
-    def get_loss(self):
-        return (self.lmbd * (self.size_calculator.get_size() / self.original_size)).to(torch.half)
+    def loss(self):
+        return (self.alpha * (self.size_calculator.get_size() / self.original_size)).to(torch.half)
 
-class LagrangianPenalty(BMPruneLossController):
-    def __init__(self, lmbd, size_calculator, target_sparsity, optimizer):
-        super().__init__()
-        self.lmbd = lmbd
-        self.size_calculator = size_calculator
+class LagrangianPenalty(BMSizeController):
+    def __init__(self, alpha, size_calculator, target_sparsity, lr=-0.01):
+        r"""Initializes :class:`Lagrangian Penalty`
+        
+        The additional loss is calculated as :math:`\mathfrac{L}=\lambda(\lambda_1(s-t)+\lambda_2(s-t)^2)`, 
+        where s is the current sparsity and t is the target sparsity
+
+        Args:
+            lmbd (float): :math:`\lambda`, which is the coefficiency of the penalty.
+            size_calculator: a helper for calculating the model size
+            target_sparsity (float): target sparsity
+            lr (float): learning rate, which should be **negative** as the lagrangian multipiers 
+            should be optimized to maximize the lagrangian term. -0.01 by default.
+        """
+        super().__init__(alpha, size_calculator)
+        if lr > 0:
+            raise ValueError("Learning rate of lagrangian multipiers should be negative!")
+        self.lr = lr
         self.l1 = bmt.DistributedParameter(
             torch.HalfTensor([0.0]).cuda()
         )
@@ -34,12 +51,11 @@ class LagrangianPenalty(BMPruneLossController):
         self.original_size = self.size_calculator.get_size()
         bmt.print_rank('model size is', self.original_size)
         self.target_sparsity = target_sparsity
-        optimizer.add_param_group({'params': self.parameters(), 'maximize': True, 'lr': 0.01})
     
-    def get_loss(self):
+    def loss(self):
         s = (self.size_calculator.get_size() / self.original_size).to(torch.half)
         t = self.target_sparsity
-        return self.lmbd * (self.l1*(s-t) + self.l2*(s-t)*(s-t))
+        return self.alpha * (self.l1*(s-t) + self.l2*(s-t)*(s-t))
 
     def get_rate(self):
         s = (self.size_calculator.get_size() / self.original_size).to(torch.half)

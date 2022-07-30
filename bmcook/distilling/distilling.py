@@ -1,6 +1,7 @@
 import types
 from typing import List
 from functools import wraps
+import torch
 import bmtrain as bmt
 import torch.nn.functional as F
 import model_center
@@ -52,11 +53,15 @@ class BMDistill(bmt.DistributedModule):
         """
         super().__init__()
         self.strategies = strategies
+        self.module_s = {}
+        self.module_t = {}
+        for strategy in strategies:
+            self.module_s.update(strategy.module_s)
+            self.module_t.update(strategy.module_t)
 
     def set_forward(self,
-        student,
-        teacher,
-        forward_fn):
+        student: torch.nn.Module,
+        teacher):
         '''
         Modify the forward function of the student model to compute additional knowledge distillation loss.
         `student` and `teacher` should return (logits, hidden_states, att_scores).
@@ -73,46 +78,46 @@ class BMDistill(bmt.DistributedModule):
             Decorated `forward_fn` function.
         '''
         # Inspect all necessary tensors
-        module_s = {}
-        module_t = {}
-        strategies = self.strategies
-        for strategy in strategies:
-            module_s.update(strategy.module_s)
-            module_t.update(strategy.module_t)
-        inject_inspection(student, module_s, '_student')
-        inject_inspection(teacher, module_t, '_teacher')
+        inject_inspection(student, self.module_s, '_student')
+        inject_inspection(teacher, self.module_t, '_teacher')
 
-        @wraps(forward_fn)
-        def forward(model, dec_input, dec_length, targets, loss_func):
-            # Get the output of both student and teacher models.
-            with bmt.inspect.inspect_tensor() as inspector:
-                outputs = forward_fn(
-                    model, dec_input, dec_length, targets, loss_func
-                )
-                outputs_t = teacher(
-                    dec_input, dec_length, return_logits = True
-                )
-            
-            # Get necessary tensors of hidden layers
-            records = {}
-            for record in inspector._summary:
-                records[record['name']] = record['tensor']
-            records_s = read_inspection(records, module_s, '_student')
-            records_t = read_inspection(records, module_t, '_teacher', detach=True)
+        set_loss = self.set_loss
+        training = self.training
 
-            # Calculation of modified loss
-            
-            if self.training:
-                loss = outputs[0]
-                d_loss = 0
-                logits_s = outputs[1]
+        def decorate_forward(f):
+            @wraps(f)
+            def new_forward(dec_input, dec_length, *args, **kwargs):
+                # Get the output of both student and teacher models.
+                with bmt.inspect.inspect_tensor() as inspector:
+                    outputs = f(
+                        dec_input, dec_length, *args, **kwargs
+                    )
+                    outputs_t = teacher(
+                        dec_input, dec_length, return_logits = True
+                    )
+                # Get necessary tensors of hidden layers
+                records = {}
+                for record in inspector._summary:
+                    records[record['name']] = record['tensor']
+                records_s = read_inspection(records, self.module_s, '_student')
+                records_t = read_inspection(records, self.module_t, '_teacher', detach=True)
+                logits_s = outputs
                 logits_t = outputs_t.detach()
-                for strategy in strategies:
-                    d_loss = d_loss + strategy.loss(logits_s, logits_t, records_s, records_t)
-                loss = loss + d_loss
-                outputs[0] = loss
-                outputs = outputs + [d_loss, ]
+                
+                # Calculation of modified loss
+                d_loss = 0
+                if training:
+                    for strategy in self.strategies:
+                        d_loss = d_loss + strategy.loss(logits_s, logits_t, records_s, records_t)
 
-            return outputs
+                set_loss(d_loss)
 
-        return forward
+                return outputs
+            return new_forward
+
+        student.forward = decorate_forward(student.forward)
+
+    def set_loss(self, loss):
+        self.d_loss = loss
+    def loss(self):
+        return self.d_loss
