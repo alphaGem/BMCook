@@ -1,5 +1,6 @@
 import bmtrain as bmt
 import torch
+from .. import cupboard
 
 class BMSizeController(bmt.DistributedModule):
     r"""Calculates loss according to the model sparsity.
@@ -48,7 +49,8 @@ class LagrangianPenalty(BMSizeController):
             torch.HalfTensor([0.0]).cuda()
         )
         bmt.synchronize()
-        self.original_size = self.size_calculator.get_size()
+        cb: cupboard.Cupboard = self.cupboard
+        self.original_size = cb.get_original_size()
         bmt.print_rank('model size is', self.original_size)
         self.target_sparsity = target_sparsity
     

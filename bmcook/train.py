@@ -133,6 +133,7 @@ def main():
                         vv.bias.data = state_dict[kk+'.bias'].clone().cuda()
                 v._modules[k] = v._modules[k]._module
     
+
     # for distillation
     Trainer.forward = BMDistill.set_forward(model, teacher, Trainer.forward, config)
 
