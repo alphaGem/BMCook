@@ -9,3 +9,5 @@ slurm*.out
 example/results
 results
 *.idx
+log.log
+err.log

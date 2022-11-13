@@ -20,7 +20,7 @@ class BMPrune(bmt.DistributedModule):
             strategies (List[BMPruneStrategy]): Describes which masks to use.
         """
         super().__init__()
-        self.strategies = torch.nn.ModuleList(strategies)
+        self.strategies: List[BMPruneStrategy] = torch.nn.ModuleList(strategies)
 
     def set_forward(
         self,
@@ -42,4 +42,3 @@ class BMPrune(bmt.DistributedModule):
         for strategy in strategies:
             bmt.init_parameters(strategy)
             strategy.inject_mask(model)
-            strategy.inject_sparsity(size_con.size_calculator)

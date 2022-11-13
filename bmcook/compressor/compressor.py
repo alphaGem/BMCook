@@ -5,6 +5,7 @@ from .. import distilling as bmd
 from .. import quant as bmq
 from .. import moe as bme
 from .. import size_controller as bmsize
+from .. import cupboard
 
 class Compressor(bmt.DistributedModule):
     def __init__(
@@ -18,11 +19,14 @@ class Compressor(bmt.DistributedModule):
         teacher: torch.nn.Module = None
     ):
         super().__init__()
+        self.model = model
         self.pruner = pruner
         self.distiller = distiller
         self.quantizer = quantizer
         self.moefier = moefier
         self.size_controller = size_controller
+
+        cupboard.utils.inject_cupboard(model)
 
         if pruner: pruner.set_forward(model, size_controller)
         if distiller: distiller.set_forward(model, teacher)
@@ -53,7 +57,7 @@ class Compressor(bmt.DistributedModule):
             bmt.optim_step(self.size_controller_optimizer)
 
     def loss(self):
-        loss = self.distiller.loss() + self.size_controller.loss()
+        loss = self.distiller.loss() + self.size_controller.loss(self.model)
         return loss
 
     

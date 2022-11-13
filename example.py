@@ -143,7 +143,6 @@ def main():
     # size penalty
     size_loss = bmcook.size_controller.LagrangianPenalty(
         alpha = 1, 
-        size_calculator = bmcook.size_controller.GPT2SizeCalculator(gpt_config), 
         target_sparsity = 0.12
     )
 
@@ -209,8 +208,9 @@ def main():
 
         optimizer.zero_grad()
         compressor.zero_grad() # NB
-        outputs = gpt(dec_input, dec_length, return_logits=True)[:,:,:-1]
+        outputs = gpt(dec_input, dec_length, output_logits=True).logits
         batch, seq_len, vocab_out_size = outputs.size()
+        bmt.print_rank(outputs.size())
         original_loss = loss_func(outputs.view(batch * seq_len, vocab_out_size), targets.view(batch * seq_len))
 
         original_loss = bmt.sum_loss(original_loss)
@@ -224,7 +224,7 @@ def main():
         compressor.step() #NB
         iteration_time = time.time() - st
         average_time = average_time * average_time_shift + (1 - average_time_shift) * iteration_time
-        bmt.print_rank(global_loss.item(), original_loss.item())
+        # bmt.print_rank(global_loss.item(), original_loss.item())
         bmt.print_rank(
             "| Iter: {:6d} | loss: {:.4f} | scale: {:10.4f} | time: {:.4f} | original_loss: {:.4f} |".format(
                 iteration,
@@ -254,8 +254,9 @@ def main():
             for p in FFNi_pruning_list:
                 p.print_mask()
             bmt.print_rank('-'*89)
-            bmt.print_rank(size_loss.get_rate())
-            if size_loss.get_rate() < 0.8:
+            bmt.print_rank(size_loss.get_rate(gpt))
+            if size_loss.get_rate(gpt) < 0.8:
+
                 bmt.print_rank('pruning shut down')
                 pruner.eval()
                 size_loss.eval()

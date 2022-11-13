@@ -6,7 +6,8 @@ import torch
 import bmtrain as bmt
 import torch.nn.functional as F
 from torch.autograd import Variable
-import model_center
+from model_center.layer import Attention
+from ..cupboard import Cupboard
 
 limit_a, limit_b, epsilon = -.1, 1.1, 1e-4
 
@@ -16,21 +17,24 @@ class BMPruneStrategy(bmt.DistributedModule):
     """
     def __init__(self,
         targets,
-        type):
+        type,
+        adjacant=[]):
         r"""Initializes :class:`BMPruneStrategy`.
 
-        Adds masks to linear layers.
+        Adds masks to layers.
         
-        .. math::
-            \sum_{i=1}^n i
+        Let the layer be :math:`f: \mathbb{R}^n \to \mathbb{R}^m; x \mapsto f(x)`, and let the mask be :math:`z`.
 
-        Let the linear layer be :math:`f: \mathbb{R}^n \to \mathbb{R}^m; x \mapsto f(x)`, and let the mask be :math:`z`.
-        
         If `type` is set to 'pre', we have :math:`z \in \mathbb{R}^n`,
         and the new linear layer is :math:`x \mapsto f(x \cdot \mathrm{diag}(z))`.
 
         If `type` is set to 'post', we have :math:`z \in \mathbb{R}^m`,
         and the new linear layer is :math:`x \mapsto f(x) \cdot \mathrm{diag}(z)`.
+
+        `type=layerwise` is for pruning on an entire layer.
+
+        If `type` is set to 'layerwise', we have :math:`z \in \mathbb{R}`,
+        and the new layer is :math:`x \mapsto zf(x)`
 
         Args:
             targets:
@@ -40,13 +44,18 @@ class BMPruneStrategy(bmt.DistributedModule):
         """
         super().__init__()
         self.targets = targets
-        self.type = type
+        self.prune_type = type
+        self.adjacant = adjacant
     
     def set_optimizer(self, optimizer):
         optimizer.add_param_group({'params': self.parameters(), 'lr': 0.01})
 
     @abstractmethod
     def get_mask(self):
+        pass
+
+    @abstractmethod
+    def get_sparsity(self):
         pass
 
     def print_targets(self):
@@ -59,30 +68,46 @@ class BMPruneStrategy(bmt.DistributedModule):
     def inject_mask(self, model):
         for k, v in model.named_modules():
             if k in self.targets:
+                cb:Cupboard = v.cupboard
                 f = v.forward
-                if self.type == 'pre':
+                if self.prune_type == 'pre':
+                    g = cb.dim_in_multipier
+                    cb.dim_in_multipier = lambda: g()*self.get_sparsity()
                     def _forward(x, **kwargs):
                         x = self.apply_mask(x)
                         return f(x, **kwargs)
-                elif self.type == 'post':
+                elif self.prune_type == 'post':
+                    g = cb.dim_out_multipier
+                    cb.dim_out_multipier = lambda: g()*self.get_sparsity()
                     def _forward(*input, **kwargs):
                         x = f(*input, **kwargs)
                         return self.apply_mask(x)
-            
+                elif self.prune_type == 'layerwise':
+                    g = cb.layer_multipier
+                    cb.layer_multipier = lambda: g()*self.get_sparsity()
+                    def _forward(*input, **kwargs):
+                        x = f(*input, **kwargs)
+                        return self.apply_mask(x)
                 v.forward = _forward
-
-    @abstractmethod
-    def inject_sparsity(self, calculator):
-        pass
+            
+            if k in self.adjacant:
+                cb:Cupboard = v.cupboard
+                if self.prune_type == 'pre':
+                    g = cb.dim_out_multipier
+                    cb.dim_out_multipier = lambda: g()*self.get_sparsity()
+                elif self.prune_type == 'post':
+                    g = cb.dim_in_multipier
+                    cb.dim_in_multipier = lambda: g()*self.get_sparsity()
 
 
 class HardConcretePruning(BMPruneStrategy):
-    def __init__(self, dim, targets, type='post'):
+    def __init__(self, dim, targets, type, adjacant = []):
         self.dim = dim
         
         super().__init__(
             targets = targets,
-            type = type
+            type = type,
+            adjacant = adjacant
         )
         self.loga =  bmt.DistributedParameter(
             torch.HalfTensor([2.5]*dim)
@@ -138,21 +163,10 @@ class MHALayerPruning(HardConcretePruning):
         self.layer = layer
         super().__init__(
             dim = 1,
-            targets = ['encoder.layers.'+str(layer)+'.self_att.self_attention']
+            targets = ['encoder.layers.'+str(layer)+'.self_att.self_attention'],
+            type = 'layerwise'
         )
 
-    def inject_sparsity(self, calc):
-        space_q = calc.encoder.layers[self.layer].attn.space_q
-        f = space_q.get_dim
-        space_q.get_dim = lambda : f()*self.get_sparsity()
-
-        space_k = calc.encoder.layers[self.layer].attn.space_k
-        f = space_k.get_dim
-        space_k.get_dim = lambda : f()*self.get_sparsity()
-
-        space_v = calc.encoder.layers[self.layer].attn.space_v
-        f = space_v.get_dim
-        space_v.get_dim = lambda : f()*self.get_sparsity()
 
 
 
@@ -161,13 +175,9 @@ class FFNLayerPruning(HardConcretePruning):
         self.layer = layer
         super().__init__(
             dim = 1,
-            targets = ['encoder.layers.'+str(layer)+'.ffn.ffn']
+            targets = ['encoder.layers.'+str(layer)+'.ffn.ffn'],
+            type = 'layerwise'
         )
-
-    def inject_sparsity(self, calc):
-        space_int = calc.encoder.layers[self.layer].ffn.space_ff
-        f = space_int.get_dim
-        space_int.get_dim = lambda : f()*self.get_sparsity()
 
 class AttentionHeadPruning(HardConcretePruning):
     def __init__(self, num_heads, layer):
@@ -176,10 +186,13 @@ class AttentionHeadPruning(HardConcretePruning):
         super().__init__(
             dim = num_heads,
             targets = ['encoder.layers.'+str(layer)+'.self_att.self_attention.attention_out'],
-            type = 'pre'
+            type = 'pre',
+            adjacant = ['encoder.layers.'+str(layer)+'.self_att.self_attention.project_q']+
+                       ['encoder.layers.'+str(layer)+'.self_att.self_attention.project_k']+
+                       ['encoder.layers.'+str(layer)+'.self_att.self_attention.project_v']
         )
-        
-        
+
+
     def apply_mask(self, x):
         '''
         :param x: (batch_size, dim_model, num_heads * dim_head)
@@ -193,18 +206,7 @@ class AttentionHeadPruning(HardConcretePruning):
         x = x.view(batch_size, dim_model, dim_heads)
         return x
 
-    def inject_sparsity(self, calc):
-        space_q = calc.encoder.layers[self.layer].attn.space_q
-        f = space_q.get_dim
-        space_q.get_dim = lambda : f()*self.get_sparsity()
-
-        space_k = calc.encoder.layers[self.layer].attn.space_k
-        f = space_k.get_dim
-        space_k.get_dim = lambda : f()*self.get_sparsity()
-
-        space_v = calc.encoder.layers[self.layer].attn.space_v
-        f = space_v.get_dim
-        space_v.get_dim = lambda : f()*self.get_sparsity()
+    
 
 
 class FFNIntermediatePruning(HardConcretePruning): 
@@ -213,12 +215,9 @@ class FFNIntermediatePruning(HardConcretePruning):
         self.layer = layer
         super().__init__(
             dim = dim_int,
-            targets = ['encoder.layers.'+str(layer)+'.ffn.ffn.w_in']
+            targets = ['encoder.layers.'+str(layer)+'.ffn.ffn.w_in'],
+            type = 'post',
+            adjacant = ['encoder.layers.'+str(layer)+'.ffn.ffn.w_out']
         )
-
-    def inject_sparsity(self, calc):
-        space_int = calc.encoder.layers[self.layer].ffn.space_ff
-        f = space_int.get_dim
-        space_int.get_dim = lambda : f()*self.get_sparsity()
 
     

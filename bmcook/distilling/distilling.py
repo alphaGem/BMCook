@@ -5,6 +5,7 @@ import torch
 import bmtrain as bmt
 import torch.nn.functional as F
 import model_center
+from model_center.model.basemodel import BaseModelOutput
 from .strategy import BMDistillStrategy
 
 
@@ -89,11 +90,11 @@ class BMDistill(bmt.DistributedModule):
             def new_forward(dec_input, dec_length, *args, **kwargs):
                 # Get the output of both student and teacher models.
                 with bmt.inspect.inspect_tensor() as inspector:
-                    outputs = f(
+                    outputs:BaseModelOutput = f(
                         dec_input, dec_length, *args, **kwargs
                     )
-                    outputs_t = teacher(
-                        dec_input, dec_length, return_logits = True
+                    outputs_t:BaseModelOutput = teacher(
+                        dec_input, dec_length, output_logits=True
                     )
                 # Get necessary tensors of hidden layers
                 records = {}
@@ -101,8 +102,8 @@ class BMDistill(bmt.DistributedModule):
                     records[record['name']] = record['tensor']
                 records_s = read_inspection(records, self.module_s, '_student')
                 records_t = read_inspection(records, self.module_t, '_teacher', detach=True)
-                logits_s = outputs
-                logits_t = outputs_t.detach()
+                logits_s = outputs.logits
+                logits_t = outputs_t.logits.detach()
                 
                 # Calculation of modified loss
                 d_loss = 0
@@ -120,7 +121,6 @@ class BMDistill(bmt.DistributedModule):
     def set_loss(self, loss):
         self.d_loss = loss
     def loss(self):
-        bmt.print_rank('distill_loss', self.d_loss)
         if self.training:
             return self.d_loss
         else:
