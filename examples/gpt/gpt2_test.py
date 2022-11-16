@@ -62,6 +62,8 @@ def main():
 
     bmt.synchronize()
 
+    bmt.print_rank('model loaded')
+
     # data
     batch_size = 8
     dec_len = 512
@@ -75,6 +77,8 @@ def main():
     
     average_time = 0
     average_time_shift = 0.9
+
+    bmt.print_rank('loading dataset')
 
     dataset = Dataset(
         MMapIndexedDataset(args.data_path),
@@ -114,6 +118,8 @@ def main():
 
     model.train()
     teacher.eval()
+
+    bmt.print_rank('starting epoches')
 
     for epoch in range(3):
         

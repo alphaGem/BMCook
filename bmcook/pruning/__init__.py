@@ -164,28 +164,6 @@ class BMPrune:
         cls._masks = _masks
 
     @classmethod
-    def set_forward_sprune(cls, forward_fn):
-        r"""
-        Modify the CookTrainer.forward
-
-        :param forward_fn: func CookTrainer.forward to modify.
-        :return: new forward modified
-        """
-        if cls._sprune is True:
-            def forward(model, loss_func, targets, *model_args, **model_kwargs):
-                outputs = forward_fn(model, loss_func, targets, *model_args, **model_kwargs)
-                loss = outputs[0]
-
-                lag_loss, sparsity = cls.sprune_engine.update()
-                loss += lag_loss
-                
-                outputs[0], outputs[2], outputs[3] = loss, lag_loss, sparsity
-                return outputs
-        else:
-            forward = forward_fn
-        return forward
-
-    @classmethod
     def set_optim_for_pruning(cls, optimizer):
         '''
         Modify the step function of the optimizer to avoid the update of the pruned weights, i.e., setting corresponding gradients and parameters to zeros.

@@ -4,18 +4,17 @@ from typing import Dict
 from torch.nn.parameter import Parameter
 from .func import determinate_mask, sample, binarize
 from .plugin import SPrunePlugin
-from .utils import get_params_from_block
 
 
 class SPruneStrategy:
     def __init__(self, config: Dict) -> None:
-        self.criterion = config['criterion']
-        assert self.criterion == 'l0', "BMCook sprune do not support other criterions besides l0 yet."
+        # self.criterion = config['criterion']
+        # assert self.criterion == 'l0', "BMCook sprune do not support other criterions besides l0 yet."
         self.fixed_mask_path = config['fixed_mask_path']
         self.training_mask = config['training_mask']
         self.mask_mode = config['mask_mode']
-        self.target_mode = config['target_mode']
-        self.target_sparsity = config['target_sparsity']
+        # self.target_mode = config['target_mode']
+        # self.target_sparsity = config['target_sparsity']
 
 
 class SPruneEngine:
@@ -41,8 +40,6 @@ class SPruneEngine:
         self.plugin = plugin
         self.training = True
 
-        self.lambda_1 = Parameter(torch.tensor(0.1, dtype=torch.float, device='cuda'))
-        self.lambda_2 = Parameter(torch.tensor(0.1, dtype=torch.float, device='cuda'))
         self.training_loga = {}
         for mask in self.strategy.training_mask:
             shape = self.plugin.info_to_engine['shape'][mask]
@@ -64,13 +61,6 @@ class SPruneEngine:
                         "lr": 0.1
                         }]
         self.sp_optimizer = torch.optim.AdamW(l0_params)
-
-        lagrangian_params = [{
-                    "params": [self.lambda_1, self.lambda_2],
-                    "weight_decay": 0.0,
-                    "lr": -0.1
-                }]
-        self.lagrangian_optimizer = torch.optim.AdamW(lagrangian_params)
     
     def update(self):
         r"""
@@ -82,8 +72,6 @@ class SPruneEngine:
             if torch.abs(sparsity - self.target_sparsity) < 5e-5:
                 bmt.print_rank("binarize the mask and begin finetune...")
                 info_list = self.update_plugin_mask(training=False)
-                self.lambda_1.requires_grad_(False)
-                self.lambda_2.requires_grad_(False)
                 for v in self.training_loga.values():
                     v.requires_grad_(False)
                 self.training = False
@@ -91,23 +79,6 @@ class SPruneEngine:
             info_list = self.update_plugin_mask(training=False)
             loss, sparsity = self.loss(info_list)
         return loss, sparsity
-
-    def step(self):
-        r"""run :method:`.step()` of sprune optimizer and lagrangian optimizer"""
-        self.sp_optimizer.step()
-        self.lagrangian_optimizer.step()
-    
-    def zero_grad(self):
-        r"""run :method:`.zero_grad()` of sprune optimizer and lagrangian optimizer"""
-        self.sp_optimizer.zero_grad()
-        self.lagrangian_optimizer.zero_grad()
-
-    def loss(self, info_list):
-        r"""calculate the lagrangian loss. It can be calculated in sparsity(`float`) or dimension(`int`)"""
-        if self.strategy.target_mode == 'sparsity':
-            return self.lagrangian_loss_sparsity(info_list, layer_constraint=False)
-        elif self.strategy.target_mode == 'dimension':
-            return self.lagrangian_loss_dimension()
 
     def update_plugin_mask(self, training: bool = True):
         r"""update the mask managed in plugin"""
@@ -138,18 +109,7 @@ class SPruneEngine:
 
         return info_list
 
-    def lagrangian_loss_sparsity(self, info_list, layer_constraint: bool = False):
-        r"""The func 'lagrangian_loss_sparsity' is to calculate the lagrangian loss to get the target sparsity"""
-        expected_sparsity = get_params_from_block(info_list)
-        loss_sparsity = expected_sparsity - self.target_sparsity
-        if layer_constraint:
-            loss_sparsity = torch.mean(torch.abs(loss_sparsity))
-            expected_sparsity = torch.mean(expected_sparsity)
-
-        lagrangian_loss = self.lambda_1 * loss_sparsity + self.lambda_2 * (loss_sparsity ** 2)
-
-        return lagrangian_loss, expected_sparsity
-
+    '''
     def lagrangian_loss_dimension(self):
         r"""calculate the lagrangian loss to get the target dimension"""
         dimension_score = determinate_mask(self.training_loga)
@@ -161,28 +121,4 @@ class SPruneEngine:
         lagrangian_loss = self.lambda_1 * loss_dimension + self.lambda_2 * (loss_dimension ** 2)
         
         return lagrangian_loss, expected_dimension
-
-    def get_model_sparsity(self, layer_constraint: bool = False):
-        r"""calculate the current sparsity to calculate lagrangian loss."""
-        if not layer_constraint:
-            total_res = 0
-            num_res = 0
-            for k, v in self.training_loga.items():
-                # layer-wise
-                for layer_index in range(v.size(0)):
-                    param = self.plugin.__dict__[k.split('_loga')[0]][layer_index]['param']
-                    v_cur = v[layer_index]
-
-                    total_res +=  torch.sum(determinate_mask(v_cur)) * param * 3
-                    num_res   +=  v_cur.numel() * param * 3
-            ratio = total_res / num_res
-        else:
-            ratio = []
-            for k, v in self.training_loga.items():
-                # layer-wise
-                for layer_index in range(v.size(0)):
-                    param = self.plugin.__dict__[k.split('_loga')[0]][layer_index]['param']
-                    v_cur = v[layer_index]
-                    ratio.append(torch.sum(determinate_mask(v_cur)) / v_cur.numel())
-                ratio = torch.stack(ratio)
-        return 1 - ratio  # return sparsity
+    '''

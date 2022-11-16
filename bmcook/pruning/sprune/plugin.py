@@ -3,7 +3,7 @@ import bmtrain as bmt
 from model_center.layer import TransformerBlock
 from model_center.model import BaseModel
 
-from .utils import set_pruning_att, set_pruning_ffn, set_pruning_transformer, get_params_from_block
+from .utils import set_pruning_att, set_pruning_ffn, set_pruning_transformer
 
 class SPrunePlugin:
     r"""
@@ -242,6 +242,7 @@ class SPrunePlugin:
                     yield name
                     break
 
+    '''
     def get_sparsity(self):
         r"""
         calculate the sparsity in single grain
@@ -266,3 +267,4 @@ class SPrunePlugin:
 
         sparsity = 1 - expected_params / all_params
         return sparsity
+    '''

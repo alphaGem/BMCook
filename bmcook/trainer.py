@@ -10,6 +10,8 @@ from torch.nn import Module
 from torch.optim import Optimizer
 from packaging.version import parse as parse_version
 
+from .compressing import BMCompress
+from .compressing.cost_penalty import CostPenalty, LagrangianSparsityPenalty
 from .distilling import BMDistill
 from .pruning import BMPrune
 from .moe import BMMoE
@@ -22,7 +24,7 @@ def version_checker():
 
     return True if the ModelCenter version is earlier than 0.1.3
     """
-    result = subprocess.check_output('pip show model-center', shell=True)
+    result = subprocess.check_output('python3 -m pip show model-center', shell=True)
     version = parse_version(str(result).split('\\n')[1].split(' ')[-1])
 
     return version <= parse_version('0.1.3')
@@ -150,11 +152,21 @@ class CookTrainer:
         # remove CheckpointBlock
         model = remove_checkpointblock(model)
 
+
         # for pruning
         BMPrune.version = cls._is_old_modelcenter
         BMPrune.compute_mask(model, cook_config)
-        cls.forward = BMPrune.set_forward_sprune(cls.forward)
         BMPrune.set_optim_for_pruning(optimizer)
+
+        # for size controlling
+        if cook_config.get('pruning')['is_pruning'] and cook_config.get('pruning')['mask_method']=='sprune':
+            penalty =  LagrangianSparsityPenalty(model,
+                cook_config.get('pruning')['sprune']['criterion'],
+                cook_config.get('pruning')['sprune']['target_mode'],
+                cook_config.get('pruning')['sprune']['target_sparsity'])
+        else:
+            penalty = CostPenalty(model)
+        cls.forward = BMCompress(model, True, BMPrune, penalty).set_forward(cls.forward)
 
         # for distillation
         BMDistill.version = cls._is_old_modelcenter
@@ -166,7 +178,9 @@ class CookTrainer:
         # for moefication
         cls.forward = BMMoE.get_hidden(model, cook_config, cls.forward)
 
+        bmt.print_rank('done')
         bmt.synchronize()
+        bmt.print_rank('done2')
 
 
 class CPMAntTrainer:
